@@ -1,0 +1,303 @@
+---
+title: "TP Regression Non ParamÃ©trique"
+author: "Rudy Detain"
+date: "04/01/2019"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r library, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+library(KernSmooth)
+library(tidyverse)
+library(sm)
+library(tsoutliers)
+```
+
+Nous chargeons le jeu de données *DataReg* .
+
+```{r}
+datareg = read.csv("DataReg.csv")
+summary(datareg)
+plot(datareg$X, datareg$Y, xlab = "X", ylab = "Y", main = "Y = f(X)")
+```
+
+#Situation
+
+Nous pouvons tout d'abord observer graphiquement la distribution des Xi.
+
+```{r, warning = F, message = F}
+ggplot(data = datareg, aes(x  = X)) +
+  geom_histogram(aes(y=..density..), fill = "Black", colour = "White") +
+  geom_density(alpha=.2, fill="#FF6666") +
+  ggtitle("Histogramme et densité des Xi")
+```
+
+#Exploration des propriétés de g(x)
+
+##Question 1
+
+Nous utilisons la fonction *bkde* du package *KernSmooth* pour construire un estimateur non paramétrique du design *g*.
+
+Nous représentons graphiquement cette estimateur pour 4 valeurs différents de *h*.
+
+Le choix de *h* est déterminant. Nous remarquons en effet que :
+
+- plus h est petit, plus l'estimateur sera oscillant (variance importante) mais avec un faible biais,
+- plus h est grand, plus l'estimateur sera régulier mais avec un biais important.
+
+```{r}
+g_enp1 = bkde(datareg$X, kernel = "normal", canonical = F, bandwidth = 0.01, truncate = F)
+g_enp2 = bkde(datareg$X, kernel = "normal", canonical = F, bandwidth = 0.1, truncate = F)
+g_enp3 = bkde(datareg$X, kernel = "normal", canonical = F, bandwidth = 0.5, truncate = F)
+g_enp4 = bkde(datareg$X, kernel = "normal", canonical = F, bandwidth = 1, truncate = F)
+plot(g_enp1$x, g_enp1$y, type = "l", col = "red", xlim = c(-0.5,2))
+lines(g_enp2$x, g_enp2$y, type = "l", col = "blue")
+lines(g_enp3$x, g_enp3$y, type = "l", col = "black")
+lines(g_enp4$x, g_enp4$y, type = "l", col = "green")
+legend("topleft", c("h = 0.01", "h = 0.1", "h = 0.5", "h = 1"), col = c("red", "blue", "black", "green"), lty = 1)
+```
+
+##Question 2
+
+Nous calculons la fenêtre *optimale* en utilisant la fonction *h.select* du package *sm*.
+
+```{r}
+hn = h.select(datareg$X, method = "cv")
+print(paste0("hn = ",hn))
+```
+
+Nous représentons graphiquement l'estimateur associé à cette fenêtre optimale. On compare ce graphique à celui de la densité d'une loi uniforme sur [0,1]. Nous remarquons déjà que g a une allure très différente de celle de la loi uniforme.
+
+```{r}
+g_enp = bkde(datareg$X, kernel = "normal", canonical = F, bandwidth = hn, truncate = F)
+xunif = runif(10000)
+plot(g_enp$x, g_enp$y, type = "l", col = "blue", xlim = c(-0.5,2), main = "Estimateur de g VS Loi uniforme sur [0,1]")
+lines(g_enp$x, dunif(g_enp$x,0,1), type = "l", col = "red")
+```
+
+##Question 3
+
+Nous traçons un QQplot afin de comparer les quantiles liés à la distribution des Xi à ceux liés à un échantillon de 10000 réalisations d'une loi uniforme sur [0,1].
+
+En théorie, si l'hypothèse selon laquelle g serait uniforme était vrai, nous devrions obtenir une droite. Ce qui n'est pas le cas ici. Nous rejetons donc cette hypothèse.
+
+```{r}
+qqplot(datareg$X, runif(10000), main = "QQplot : Xi / Loi Uniforme sur [0,1]")
+```
+
+#Reconstruction de r(x)
+
+#Question 1
+
+Le graphique de Y=f(X) tracé au début du rapport montre que la relation entre Y et X n'est probablement pas linéaire.
+
+Pour s'en convaincre, nous pouvons étudier les résultats d'une régression linéaire basique.
+
+Le premier graphique nous confirme cette impression de non linéarité.
+
+```{r}
+reg = lm(Y~X, data = datareg)
+plot(datareg$X, datareg$Y, xlab = "X", ylab = "Y", main = "Données VS Droite de régression Y~X")
+abline(reg, col = "red")
+```
+
+Les graphiques de diagnostic du modèle de régression nous montrent que :
+
+- une relation non linéaire entre Y et X n'a pas été bien expliquée par le modèle de régression linéaire (parabole observée dans le graphique "Residuals VS Fitted"),
+- l'hypothèse d'homoscédasticité n'est pas totalement vérifiée (la répartition des résidus est différente sur [-1,0] dans le graphique "Scale-Location").
+
+```{r}
+par(mfrow=c(2,2))
+plot(reg)
+```
+
+Estimer r(x) de manière non paramétrique revient à approcher cette fonction **localement**, c'est-à-dire autour de chaque x0 en accordant un certain poids aux points voisins. Cette estimation serait donc une première étape nécessaire pour implémenter un modèle linéaire par morceau.
+
+#Question 2
+
+## a) h identique pour tout x
+
+Nous construisons un estimateur non-paraḿetrique de r(x) en utilisant la fonction *demoSKR* vue en cours modulo quelques adaptations.
+En outre, nous remplaçons le h optimal obtenu après validation croisée "manuelle" par le h optimal obtenu avec la fonction h.select calculé précédemment.
+Nous conservons le *h_dpill* calculé à l'aide de la fonction dpill ainsi que le *h_silver*, ces estimations de h étant pertinentes lorsque le bruit est considéré comme gaussien (ce qui est le cas ici).
+
+```{r}
+demoKSR=function(X,Y){  
+  n=length(X)
+  std=sqrt(var(X))
+  hselect = h.select(datareg$X, method = "cv")
+  h_dpill=dpill(X,Y)
+  h_silver=1.06*std*n**(-1/(4+1))
+  print(paste0(", h_cv : ", hselect, "h_pill : ",h_dpill," h_silver : ", h_silver))
+  
+  #estimateurs par polynomes locaux
+  
+  R_cv0=locpoly(X,Y,drv=0,degree=0,kernel="normal",bandwidth=hselect) 
+  R_cv1=locpoly(X,Y,drv=0,degree=1,kernel="normal",bandwidth=hselect)
+  R_cv2=locpoly(X,Y,drv=0,degree=2,kernel="normal",bandwidth=hselect)
+  R_pill=locpoly(X,Y,drv=0,degree=2,kernel="normal",bandwidth=h_dpill)
+  R_silver=locpoly(X,Y,drv=0,degree=2,kernel="normal",bandwidth=h_silver)
+  
+  #plots
+  
+  plot(X,Y,pch=20,cex=0.01,xlab="X",ylab="Y", main = "Comparaison des performances d'estimateurs de r(x)")
+  lines(R_cv0,lty="dashed",col="darkgoldenrod1") #NW (hselect)
+  lines(R_cv1,lty="dashed",col="darkgoldenrod2") #degre 1 (hselect)
+  lines(R_cv2,lty="dashed",col="darkgoldenrod3") #degre 2 (hselect)
+  lines(R_pill,lty="dashed",col="blue") #degre 2 (pill)
+  lines(R_silver,lty="dashed",col="red") #degre 2 (silver)
+  legend("topleft", c("hselect NW","hselect degré 1", "hselect degré 2","dpill degré 2","silver degré 2"), col=c("darkgoldenrod1","darkgoldenrod2","darkgoldenrod3","blue", "red"), lty = 1)
+
+  h_dpill
+  h_silver
+  }  
+```
+
+Nous remarquons que :
+
+- les différents estimateurs ont un comportement similaire sur l'intervalle [0,0.5] et sont performants,
+- l'estimateur de NW (avec h = hselect) est nettement moins performant sur l'intervalle [0.5,1] que les 4 autres,
+- les estimateurs par polynômes locaux de degré 2 *LP Pill* et *LP silver* semblent les plus performants sur l'intervalle [0.5, 1].
+
+La différence de performance sur ces deux intervalles est liée à la quantité de données qui diffèrent sur ces deux intervalles. En effet, l'intervalle [0.5,1] est moins fourni en données. A h constant pour tout x, les estimateurs sont donc moins précis sur cet intervalle (la variance étant de l'ordre de 1/nh). 
+
+```{r}
+demoKSR(datareg$X, datareg$Y)
+```
+ 
+ ## b) h dépend localement de la fonction à estimer
+
+Nous utilisons la fonction *h_CVloc* vue en cours pour calculer un h local en fonction des valeurs de x. Le principe est de sous sampler nos données sur plusieurs intervalles (contrôlés par la variable *N_block*) et de calculer l'estimateur et h sur chaque intervalle.
+
+```{r}
+h_CVloc=function(X,Y,N_block){
+  #N_block multiple de n
+  n=length(X)
+  h_loc=rep(-1,N_block)
+  if((n/N_block)%%1!=0){ print("error n should be a multiple of N_block")}
+  X_sort=sort(X)
+  Y_sort=Y[order(X)]
+  for(i in 1:N_block){
+    h_loc[i]=dpill(X_sort[((i-1)*(n/N_block)+1):(i*(n/N_block))],Y_sort[((i-1)*(n/N_block)+1):(i*(n/N_block))])
+  }
+  h_locG=rep(h_loc,each=10000/N_block)
+  return(list("h_loc"=h_loc,"h_locG"=h_locG))
+}
+```
+
+Nous créons une deuxième fonction *demoSKR2* qui va nous permettre de comparer les résultats d'une estimation de r(x) réalisée avec un h constant (= dpill(X,Y)) à ceux d'une estimation réalisée avec une fenêtre localisée.
+
+```{r}
+demoKSR2=function(X,Y, N_block){
+  
+h_CVopt=h_CVloc(X,Y,N_block)
+if(length(which(is.na(h_CVopt$h_locG)))==0){h=h_CVopt$h_locG}else{h=h_CVopt$h_locG[-which(is.na(h_CVopt$h_locG))]} #on test si ce qu'on fait est raisonnable
+hglobal=dpill(X,Y)
+Y_CVopt=locpoly(X,Y,drv=0,degree=2,kernel="normal",gridsize=length(h),bandwidth=h)
+Y_CVglobal=locpoly(X,Y,drv=0,degree=2,kernel="normal",bandwidth=hglobal)
+plot(X,Y,pch=20,cex=0.01,xlab="X",ylab="Y", main = "h Global VS h Local")
+lines(Y_CVopt,lty="dashed",col="blue")
+lines(Y_CVglobal,lty="dashed",col="green")
+legend("topleft", c("pill degré 2","hlocal degré 2"), col=c("green","blue"), lty = 1)
+plot(h, main = "Evolution du h local")
+}
+```
+
+Nous appelons cette fonction avec un découpage de l'intervalle des x en 20 blocs.
+
+Les deux estimateurs ont une performance relativement similaire, bien que :
+
+- l'estimateur calculé avec un h local a un comportement plus oscilatoire mais est plus proche des vraies valeurs,
+- l'estimateur calculé avec un h global est plus lisse mais plus éloigné des vraies valeurs.
+
+Nous pouvons également observer l'évolution du hlocal en fonction de x. Nous voyons bien que la valeur de la fenêtre augmente quand la quantité de données diminue (ce qui est le cas notamment sur le premier et les trois derniers intervalles).
+
+```{r}
+demoKSR2(datareg$X, datareg$Y, 20)
+```
+
+#Etude des lois des Eps(i)
+
+## Question 1
+
+Nous implémentons les deux estimateurs Un et Vn :
+
+```{r Calcul de Un}
+Un = sum((datareg$Y[2:length(datareg$Y)] - datareg$Y[1:(length(datareg$Y)-1)])^2)/ (2*length(datareg$Y) - 2)
+```
+
+```{r Calcul de Vn}
+tildeY=datareg$Y[order(datareg$X)]
+Vn = sum((tildeY[2:length(tildeY)] - tildeY[1:(length(tildeY)-1)])^2)/ (2*length(tildeY) - 2)
+```
+
+```{r}
+print(paste0("Un = ", Un))
+print(paste0("Vn = ", Vn))
+```
+
+## Question 2
+
+Nous calculons la variance de la variable Y.
+
+```{r}
+varianceY = 1/(9999) * sum((datareg$Y[1:10000] - mean(datareg$Y))^2)
+```
+
+Nous remarquons que celle-ci est égale Un, ce qui se démontre mathématiquement (voir ci-dessous).
+
+![](Un.jpg)
+
+Nous remarquons également que la valeur de Vn est très proche de celle de la variance du bruit epsilon. Cela se vérifie par l'approche ci-dessous.
+
+![](Vn.jpg)
+
+## Question 3
+
+Nous coupons tout d'abord notre jeu de données en deux.
+
+```{r}
+datareg1 = datareg %>% filter(X.1 <= 5000)
+datareg2 = datareg %>% filter(X.1 > 5000)
+```
+
+Nous construisons un estimateur de R à l'aide de *datareg1* et nous calculons sa valeur aux points xi de *datareg2*.
+
+```{r}
+R_moins=ksmooth(datareg1$X, datareg1$Y, bandwidth=dpill(datareg1$X,datareg1$Y), x.points=datareg2$X)
+plot(R_moins, main = "Estimateur de R aux points Xi de datareg2")
+```
+
+Nous calculons ensuite *Y_Tild* par la formule donnée dans l'énoncé, qui correspond à la formule des résidus. 
+
+Le graphique ci-dessous nous montre que la distribution approximative de Y_tild est celle de la loi normale. 
+
+```{r}
+set.seed(2)
+Y_Tilde = datareg2$Y[order(datareg2$X)] - R_moins$y
+plot(density(Y_Tilde), col = "blue", main = "Distribution de Y_Tilde VS Loi Normale")
+lines(density(rnorm(5000,0,1)), col = 'red')
+```
+
+Nous vérifions également que les quantiles empiriques correspondent aux quantiles théoriques de la loi normale en traçant un qqplot.
+
+```{r}
+qqplot(Y_Tilde, rnorm(5000,0,1), main = "qqplot Y_Tilde VS Loi Normale")
+```
+
+
+## Question 4
+
+*Y_Tilde*, par sa construction, représente un estimateur de Mu(x) et donc de la densité des résidus.
+Nous pouvons implémenter un test de Jarque-Bera afin de vérifier si les résidus sont bien normaux.
+Le test renvoie la valeur de la statistique de test, la p-valeur associée, ainsi que les valeurs de *skewness* et *kurtosis* associées.
+
+La p.value associée au test est supérieure à 0.05, **nous ne rejetons donc pas l'hypothèse de normalité des résidus**.
+
+```{r}
+JarqueBera.test(Y_Tilde)
+```
+
+
